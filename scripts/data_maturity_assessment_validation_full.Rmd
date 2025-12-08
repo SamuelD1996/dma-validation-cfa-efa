@@ -1,0 +1,698 @@
+---
+title: "data_maturity_assessment_validation"
+author: "Sam Duijnstee"
+date: "2025-05-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Data cleaning
+```{r packages_cleaning}
+library(readxl)
+library(dplyr)
+```
+## Load data
+```{r load}
+file <- "../data/Ruwe resultaten 2022 tot met dec 2024 sdw gecombineerd.xlsx"
+df <- read_excel(file)
+
+# Select relevant columns (the questionnaire items)
+dvc <- df %>% select(32:ncol(df))
+```
+
+## Rename columns
+```{r remame columns}
+# Create the function
+transform_column_name <- function(name) {
+  number <- strsplit(name, " ")[[1]][1]
+  main_number <- strsplit(number, "\\.")[[1]][1]
+  
+  theme <- dplyr::case_when(
+    main_number == "1" ~ "ld",
+    main_number == "2" ~ "sg",
+    main_number == "3" ~ "pw",
+    main_number == "4" ~ "dq",
+    main_number == "5" ~ "at",
+    main_number == "6" ~ "em",
+    main_number == "7" ~ "co",
+    TRUE ~ "xx"
+  )
+  return(theme)
+}
+
+
+# Apply the function
+new_columns <- paste0(
+  sapply(names(dvc), transform_column_name),
+  sprintf("%02d", seq_along(dvc))
+)
+colnames(dvc) <- new_columns
+
+# Use content of the individual items as columnn names
+new_columns <- c(
+  "ld01_data_awareness", "ld02_finance_ownership", "ld03_leadership_curiosity", "ld04_dgw_planning_theme",
+  "ld05_dgw_dev_budget", "ld06_data_project_based", "ld07_data_initiation", "ld08_dgw_strategic_theme",
+  "ld09_data_strategy", "ld10_cdo_present", "ld11_dgw_struct_budget", "ld12_data_value_proven",
+  "ld13_bi_entity", "ld14_data_driven_norm", "sg15_qualitative_goals", "sg16_financial_reporting",
+  "sg17_ad_hoc_reactive", "sg18_quantified_goals", "sg19_financial_orientation", "sg20_bi_translation",
+  "sg21_interdisciplinary_prioritization", "sg22_goal_adjustment", "sg23_data_driven_goals",
+  "sg24_partner_datascience_collab", "pw25_data_process_documented", "pw26_workflow_translation",
+  "pw27_methodical_datapilots", "pw28_privacy_officer_involved", "pw29_dgw_protocols", "pw30_data_in_policy",
+  "pw31_steering_info_access", "pw32_data_in_innovation", "pw33_ethical_data_processing",
+  "pw34_data_driven_redesign", "dq35_fixed_definitions", "dq36_coordination_definitions",
+  "dq37_org_wide_data_agreements", "dq38_data_reliability", "dq39_practical_definitions",
+  "dq40_info_understandable", "dq41_data_mgmt_and_analytics", "dq42_external_data_enrichment",
+  "dq43_data_for_prediction", "dq44_data_for_ml_dev", "dq45_controlled_dataflows", "at46_app_data_collection",
+  "at47_external_data_access", "at48_bi_env_available", "at49_it_architecture_asset", "at50_central_data_env",
+  "at51_selfservice_dashboard", "at52_advanced_analytics_tooling", "at53_it_supports_operations",
+  "at54_cloud_datascience_use", "at55_semantic_architecture", "em56_data_stewardship",
+  "em57_standardized_workflow", "em58_multidisciplinary_dashboards", "em59_bi_analyst_available",
+  "em60_domain_it_link", "em61_data_in_advice", "em62_data_contact_point", "em63_model_input_professional",
+  "em64_ops_algorithms_balance", "em65_analytics_responsible_role", "em66_tactical_algorithms_balance",
+  "em67_ai_input_professional", "co68_digital_exchange_chain", "co69_patient_secure_comm",
+  "co70_data_governance_partners", "co71_interorg_data_meetings", "co72_thematic_standardization",
+  "co73_digital_exchange_external", "co74_pgo_collaboration", "co75_interorg_data_analysis",
+  "co76_interorg_predictive_decisions", "co77_population_health_data"
+)
+
+# Check if lengths match
+if(length(new_columns) != ncol(dvc)) {
+  stop("Aantal nieuwe kolomnamen komt niet overeen met aantal kolommen in de DataFrame")
+}
+
+# Rename columns
+colnames(dvc) <- new_columns
+
+```
+
+## Check for missings
+There are no missing values
+```{r missing values}
+# Check for missing values per column
+colSums(is.na(dvc))
+```
+
+## Recode variables
+### Check unique values per column
+
+```{r unique}
+# Check unique values per column
+lapply(dvc, unique)
+```
+
+### Recode all variables
+```{r recode}
+library(dplyr)
+
+dvc <- dvc %>%
+  mutate(across(everything(), ~ case_when(
+    . == "Van toepassing" ~ 0,
+    . == "Niet van toepassing" ~ 2,
+    . %in% c(
+      "Niet van toepassing, hier willen we in 2024 aan werken",
+      "Niet van toepassing, hier willen we in 2023 aan werken",
+      "Niet van toepassing, hier willen we het komende jaar aan werken"
+    ) ~ 1,
+    TRUE ~ as.numeric(.)
+  )))
+
+head(dvc, 5)
+
+```
+
+# Confirmatory and Exploratory factor analysis
+
+## Explanation factors
+1. LD = Leadership and data-culture (ld01 - ld14)
+2. SG = Strategy and Governance (sg15 - sg24)
+3. PW = Process (-oriented work) (pw25 - pw34)
+4. DQ - Definitions and data quality (dq35 - dq45)
+5. AT = Architecture and tools (at46 - at55)
+6. EM = Employee (knowledge and skills) (em56 - em67)
+7. CO = Collaboration with others than own organisation (co68 - co77)
+
+### install / load packages
+```{r packages}
+library(psych) # for EFA
+library(lavaan) # for CFA
+library(readr) # CSV reading
+library(GPArotation) # Rotation support
+library(semPlot) # Plotting CFA
+library(ggplot2) # for visualizations
+```
+
+### load data and basic processing
+```{r load}
+# Remove any non-item columns (e.g., index)
+dvc_items <- dvc[, 1:77]
+
+# Convert all items to numeric variables
+dvc_items[] <- lapply(dvc_items, as.numeric)
+```
+
+## 1 Confirmatory factor analysis
+The first step is to run a cfa on the full dataset (77 items, 146 cases). This is an initial check on the factor-structure. If this test fails we will follow up by performing an exploratory factor analysis. The model failed when key metrics are not sufficient (SRMR, CFI, RMSEA), loadings are weak (<0,32) or insignificant. Weak loadings will be removed until there is a stable model.  
+```{r cfa}
+# Get all final items into one variable
+items <- c(
+  "ld01_data_awareness", "ld02_finance_ownership", "ld03_leadership_curiosity", "ld04_dgw_planning_theme",
+  "ld05_dgw_dev_budget", "ld06_data_project_based", "ld07_data_initiation", "ld08_dgw_strategic_theme",
+  "ld09_data_strategy", "ld10_cdo_present", "ld11_dgw_struct_budget", "ld12_data_value_proven",
+  "ld13_bi_entity", "ld14_data_driven_norm", "sg15_qualitative_goals", "sg16_financial_reporting",
+  "sg17_ad_hoc_reactive", "sg18_quantified_goals", "sg19_financial_orientation", "sg20_bi_translation",
+  "sg21_interdisciplinary_prioritization", "sg22_goal_adjustment", "sg23_data_driven_goals",
+  "sg24_partner_datascience_collab", "pw25_data_process_documented", "pw26_workflow_translation",
+  "pw27_methodical_datapilots", "pw28_privacy_officer_involved", "pw29_dgw_protocols",
+  "pw30_data_in_policy", "pw31_steering_info_access", "pw32_data_in_innovation",
+  "pw33_ethical_data_processing", "pw34_data_driven_redesign", "dq35_fixed_definitions",
+  "dq36_coordination_definitions", "dq37_org_wide_data_agreements", "dq38_data_reliability",
+  "dq39_practical_definitions", "dq40_info_understandable", "dq41_data_mgmt_and_analytics",
+  "dq42_external_data_enrichment", "dq43_data_for_prediction", "dq44_data_for_ml_dev",
+  "dq45_controlled_dataflows", "at46_app_data_collection", "at47_external_data_access",
+  "at48_bi_env_available", "at49_it_architecture_asset", "at50_central_data_env",
+  "at51_selfservice_dashboard", "at52_advanced_analytics_tooling", "at53_it_supports_operations",
+  "at54_cloud_datascience_use", "at55_semantic_architecture", "em56_data_stewardship",
+  "em57_standardized_workflow", "em58_multidisciplinary_dashboards", "em59_bi_analyst_available",
+  "em60_domain_it_link", "em61_data_in_advice", "em62_data_contact_point",
+  "em63_model_input_professional", "em64_ops_algorithms_balance", "em65_analytics_responsible_role",
+  "em66_tactical_algorithms_balance", "em67_ai_input_professional", "co68_digital_exchange_chain",
+  "co69_patient_secure_comm", "co70_data_governance_partners", "co71_interorg_data_meetings",
+  "co72_thematic_standardization", "co73_digital_exchange_external", "co74_pgo_collaboration",
+  "co75_interorg_data_analysis", "co76_interorg_predictive_decisions", "co77_population_health_data"
+)
+
+# convert 
+# cfa_data <- dvc_items[, items] # creates new dataframe only select predefined items
+# cfa_data[] <- lapply(cfa_data, function(x) factor(x, levels = c(0, 1, 2), ordered = TRUE)) # apply a transformation to every column in cfa_data
+```
+
+### 1.1 Define the model
+Define the model complying with Lavaan syntax (the library for cfa)
+```{r cfa_model}
+model <- '
+  # LD: Leadership and data-culture
+  LD =~ ld01_data_awareness + ld02_finance_ownership + ld03_leadership_curiosity + 
+        ld04_dgw_planning_theme + ld05_dgw_dev_budget + ld06_data_project_based + 
+        ld07_data_initiation + ld08_dgw_strategic_theme + ld09_data_strategy + 
+        ld10_cdo_present + ld11_dgw_struct_budget + ld12_data_value_proven + 
+        ld13_bi_entity + ld14_data_driven_norm
+
+  # SG: Strategy & Governance
+  SG =~ sg15_qualitative_goals + sg16_financial_reporting + sg17_ad_hoc_reactive + 
+        sg18_quantified_goals + sg19_financial_orientation + sg20_bi_translation + 
+        sg21_interdisciplinary_prioritization + sg22_goal_adjustment + 
+        sg23_data_driven_goals + sg24_partner_datascience_collab
+
+  # PW: Process oriented work
+  PW =~ pw25_data_process_documented + pw26_workflow_translation + 
+        pw27_methodical_datapilots + pw28_privacy_officer_involved + 
+        pw29_dgw_protocols + pw30_data_in_policy + pw31_steering_info_access + 
+        pw32_data_in_innovation + pw33_ethical_data_processing + pw34_data_driven_redesign
+
+  # DQ: Definitions and data quality
+  DQ =~ dq35_fixed_definitions + dq36_coordination_definitions + 
+        dq37_org_wide_data_agreements + dq38_data_reliability + 
+        dq39_practical_definitions + dq40_info_understandable + 
+        dq41_data_mgmt_and_analytics + dq42_external_data_enrichment + 
+        dq43_data_for_prediction + dq44_data_for_ml_dev + dq45_controlled_dataflows
+
+  # AT: Architecture and tools
+  AT =~ at46_app_data_collection + at47_external_data_access + 
+        at48_bi_env_available + at49_it_architecture_asset + 
+        at50_central_data_env + at51_selfservice_dashboard + 
+        at52_advanced_analytics_tooling + at53_it_supports_operations + 
+        at54_cloud_datascience_use + at55_semantic_architecture
+
+  # EM: Employee knowledge and skills
+  EM =~ em56_data_stewardship + em57_standardized_workflow + 
+        em58_multidisciplinary_dashboards + em59_bi_analyst_available + 
+        em60_domain_it_link + em61_data_in_advice + em62_data_contact_point + 
+        em63_model_input_professional + em64_ops_algorithms_balance + 
+        em65_analytics_responsible_role + em66_tactical_algorithms_balance + 
+        em67_ai_input_professional
+
+  # CO: Collaboration with others than own organisation
+  CO =~ co68_digital_exchange_chain + co69_patient_secure_comm + 
+       co70_data_governance_partners + co71_interorg_data_meetings + 
+       co72_thematic_standardization + co73_digital_exchange_external + 
+       co74_pgo_collaboration + co75_interorg_data_analysis + 
+       co76_interorg_predictive_decisions
+
+'
+```
+
+### 1.2 Run the cfa
+the WLSMV (weighted least squares mean and variance adjusted) estimator is used, this one is the recommended estimator for ordinal variables (Rhemtulla et al. 2012).
+```{r cfa_run}
+# fit the model
+## estimator = "WLSMV" = Weighted Least Squares Mean and Variance adjusted for dealing with ordinal data
+fit <- cfa(model, data = dvc_items, estimator = "WLSMV", ordered = names(dvc_items))
+
+# Display the factor loadings
+summary(fit, fit.measures = TRUE, standardized = TRUE)
+
+# Display the fitmeasures (cfi, tli, rmsea, srmr)
+fitMeasures(fit, c("cfi", "tli", "rmsea", "srmr"))
+```
+
+#### 1.2.1 Interpretation
+**Thresholds:**
+* CFI: $\geq 0.95$
+* RMSEA: $\leq 0.06$
+* SRMR $\leq 0.08$
+
+2. Exploratory factor analysis
+First a correlation matrix will be created using `spearman` correlations. Although `polychoric` correlations are often preferred for ordinal data, tests showed non-ideal results (low KMO, high factor prediction). Polychoric correlations are more suitable when an underlying continuous structure is assumed within the data. However, for the categories in the data maturity assessment, not a pure continuous structure can be assumed (0 = applicable, 1 = not applicable but want to work on it in the future, 2 = not applicable). The assumptions for polychoric correlations are not fulfilled (normality, consistent threshold spacing) Spearman correlations are more suitable for non-parametric structures, which seems to be the case in the data maturity assessment. In the correlation matrix, items that correlate $<0.20$ with all other items will be deleted. Also items with correlation $>.90$ will be carefully considered. 
+
+### 2.1 Correlation matrix
+```{r efa_data}
+efa_data <- dvc_items[, items] # creates new dataframe only select predefined items
+```
+
+```{r correlation}
+# poly correlation
+#poly <- polychoric(efa_data) # makes use of the psych package
+#cor_matrix_poly <- poly$rho
+
+#round(cor_matrix_poly[1:5, 1:5], 2) # inspect a subsection of the matrix
+
+# Load required package
+library(dplyr)
+
+# Step 1: Calculate Spearman correlation matrix
+cor_matrix_spearman <- cor(efa_data, method = "spearman", use = "pairwise.complete.obs")
+
+# Step 2: Convert matrix to suitable table format (long)
+cor_df <- as.data.frame(as.table(cor_matrix_spearman))
+colnames(cor_df) <- c("item1", "item2", "correlation")
+
+# Step 3: Remove self-correlations
+cor_df <- cor_df[cor_df$item1 != cor_df$item2, ]
+
+# Step 4: Remove duplicate item pairs (e.g., A-B and B-A)
+cor_df$pair_key <- apply(cor_df[, c("item1", "item2")], 1, function(x) paste(sort(x), collapse = "_"))
+cor_df_unique <- cor_df[!duplicated(cor_df$pair_key), ]
+
+# Step 5: Identify high correlations (> 0.9)
+high_corrs <- subset(cor_df_unique, abs(correlation) > 0.9)
+
+# Step 6: Identify weak items (max correlation < 0.2)
+weak_items <- cor_df %>%
+  group_by(item1) %>%
+  summarize(max_corr = max(abs(correlation), na.rm = TRUE)) %>%
+  filter(max_corr < 0.2) %>%
+  arrange(max_corr)
+
+# Step 7: Remove weak items from 'items' list and efa_data
+weak_item_names <- weak_items$item1
+items <- setdiff(items, weak_item_names)
+efa_data <- dvc_items[, items]
+
+# Results
+cat(" Items with no strong correlations (max abs(r) < 0.2) and were removed:\n")
+print(weak_items)
+
+cat("\n Item pairs with very high correlations (abs(r) > 0.9):\n")
+print(high_corrs)
+
+# Re-calculate the correlatoin matrix on new itemset
+cor_matrix_spearman <- cor(efa_data, method = "spearman", use = "pairwise.complete.obs")
+
+```
+#### 2.1.1 **Interpretation**
+Only 1 item identified with a correlation of <0.20. This item (ld02_finance_ownership) was deleted. There were no items with high correlations (>0.90). 
+
+### 2.2 Suitability testing
+#### 2.2.1 KMO and Bartlett test
+KMO and Bartlett test are conducted, both are executed on the spearman correlation matrix. Overall KMO should be high (individual variables > 0.5 considered acceptable for factor analysis), Bartlett should be significant (p<.05). 
+
+```{r kmo_bartlett}
+# poly cor
+#poly_cor <- polychoric(efa_data)
+
+## Bartlett's test
+#bartlett_poly <- cortest.bartlett(poly_cor$rho, n=146)
+#print(bartlett_poly)
+
+## KMO
+#kmo_poly <- KMO(poly_cor$rho)
+#print(kmo_poly$overall)
+#print(kmo_poly)
+
+# spearman cor
+kmo_result <- KMO(cor_matrix_spearman)
+print(kmo_result)
+
+# Step 3: Bartlett’s test
+bartlett_result <- cortest.bartlett(cor_matrix_spearman, n = nrow(efa_data))
+print(bartlett_result)
+
+efa_data_cleaned <- efa_data
+cor_matrix_cleaned <- cor_matrix_spearman
+```
+### 2.3 Parallel analysis using fa
+This will output a suggested amount of factors, use this amount for the efa.
+For the fm, minres was chosen which is suitable for ordinal data. Choice of fa is factor analysis. The factor number will be chosen based on the parallel analysis, kaiser values ev > 1, visual examination of scree plots. 
+```{r cleaned kmo parallel_analysis}
+# Run parallel analysis
+fa_parallel_results <- fa.parallel(
+  cor_matrix_cleaned, 
+  fm = "minres", # minimal residuals
+  fa = "fa", # factor analysis
+  n.obs = nrow(efa_data_cleaned)
+)
+
+# Extract actual and simulated eigenvalues from the parallel analysis
+ev_actual <- fa_parallel_results$fa.values
+ev_simulated <- fa_parallel_results$fa.sim
+ev_difference <- ev_actual - ev_simulated
+
+# Calculate the number of factors to retain using Parallel Analysis
+n_factors_parallel <- fa_parallel_results$nfact
+cat("Number of factors suggested by parallel analysis:", n_factors_parallel, "\n")
+
+# Calculate the number of factors to retain using the Kaiser criterion (EV > 1)
+n_kaiser <- sum(ev_actual > 1)
+cat("Number of factors based on Kaiser criterion (EV > 1):", n_kaiser, "\n")
+
+ev_table <- data.frame(
+  Factor = 1:length(ev_actual),
+  Eigenvalue_actual = round(ev_actual, 3),
+  Eigenvalue_simulated = round(ev_simulated, 3),
+  Difference = round(ev_difference, 3),
+  retained_by_parallel = ev_actual > ev_simulated,
+  retained_by_kaiser = ev_actual > 1
+)
+
+print(ev_table)
+```
+```{r scree plot cleaned spearman}
+# Load required library
+library(ggplot2)
+
+# Create data frame for plotting
+ev_plot_df <- data.frame(
+  Factor = 1:length(ev_actual),
+  Actual = ev_actual
+)
+
+# Determine number of factors retained by parallel analysis
+n_retained_parallel <- sum(ev_actual > ev_simulated)
+
+# Plot
+ggplot(ev_plot_df, aes(x = Factor, y = Actual)) +
+  geom_line(color = "#0072B2", size = 1.2) +
+  geom_point(color = "#0072B2", size = 2) +
+  geom_hline(yintercept = 1, linetype = "dotted", color = "darkgrey") +  # Kaiser criterion 
+  annotate("text", x = length(fa_parallel_results$fa.values) * 0.95, y = 1.4, 
+           label = "Kaiser Criterion (EV = 1)", hjust = 1, 
+           size = 3.5, color = "darkgrey", fontface = "italic") +
+  geom_vline(xintercept = 6, linetype = "dotted", color = "darkorange", linewidth = 1) + # kaiser line ev=1
+  annotate("text", x = 15, y = 15.5, 
+           label = "PA-result", hjust = 1, 
+           size = 3.5, color = "darkorange", fontface = "italic") +
+  labs(
+    x = "Number of Factors",
+    y = "Eigenvalue"
+  ) +
+  scale_x_continuous(breaks = seq(0, length(ev_actual), by = 5)) + # steps on x-axis
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(face = "bold", size = 13),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 14)),  # Space between y-label and axis
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(color = "grey30")
+  )
+```
+**Interpretation**: Parallel analysis: 6 factors, Kaiser Criterion 7 factors, Visual examination scree plot: 3-7 factors. In the next section I will run the efa for different factors to compare. 5 because it is proposed from the kaiser criterion, 6 because it is in between the two proposed factor-structures, and 7 because this is both the original factor structure the proposed one using the kaiser criterion. 
+
+### 2.4 Factor comparison
+Compare efa results for 5, 6, and 7 factors
+```{r efa}
+# Create list of factors I want to test out
+n_factors_list <- c(5, 6, 7) # 5 = lower-bound scree-plot, 6 = proposed from parallel, 7 = original + proposed from kaiser
+
+# for loop to test each factor
+for (n_factors in n_factors_list) {
+  cat("\n==============================\n")
+  cat("Exploratory Factor Analysis with", n_factors, "factors\n")
+  cat("==============================\n")
+  
+  # Run the factor analysis
+  efa_result <- fa(cor_matrix_cleaned, nfactors = n_factors, rotate = "oblimin", fm = "minres")
+  
+  # Print the factor loadings with a cutoff of 0.32
+  print(efa_result$loadings, cutoff = 0.32)
+}
+
+```
+ 
+
+### 2.5 Run EFA
+The final choice is 7 factors. This produced the best results, had the most balanced factor distribution and best correlations. Choice for rotation method is oblimin because the different are not believed to be independent from each other.
+```{r efa factor choice}
+efa_result <- fa(cor_matrix_cleaned, nfactors = 7, rotate = "oblimin", fm = "minres") # change n_factors based on what I want to explore
+print(efa_result$loadings, cutoff=0.32)
+n_factors = 7 # change based on what I want to explore
+```
+
+#### 2.5.1 Remove weak loadings
+Items that load < 0.32 will be deleted one by one until there are no weak loadings anymore. 
+```{r clean_items}
+# STEP 1: Transform the loadings matrix into a dataframe
+loadings_matrix <- as.data.frame(unclass(efa_result$loadings))
+counter <- 0 # keep track of n removed items
+
+repeat {
+  # Identify items where all loadings are below 0.32
+  weak_items <- rownames(loadings_matrix)[apply(abs(loadings_matrix), 1, function(x) all(x < 0.32))]
+
+  # If no such items, stop the loop
+  if (length(weak_items) == 0) break
+
+  # From these, find the weakest one (lowest max loading)
+  weakest_item <- weak_items[which.min(apply(abs(loadings_matrix[weak_items, ]), 1, max))]
+  weakest_value <- max(abs(loadings_matrix[weakest_item, ]))
+
+  cat("❌ Removing weakest item:", weakest_item, "with max loading", weakest_value, "\n")
+  counter <- counter + 1 # add 1 when an item is removed
+  # Remove item from EFA dataset
+  efa_data_cleaned <- efa_data_cleaned[, !(names(efa_data_cleaned) %in% weakest_item)]
+
+  # Recalculate everything
+  efa_data_cleaned[] <- lapply(efa_data_cleaned, function(x) as.numeric(as.character(x)))
+  cor_matrix_cleaned <- cor(efa_data_cleaned, method = "spearman", use = "pairwise.complete.obs")
+  efa_result <- fa(cor_matrix_cleaned, nfactors = n_factors, rotate = "oblimin", fm = "minres")
+  loadings_matrix <- as.data.frame(unclass(efa_result$loadings))
+  
+   # Print the updated loadings table
+  cat("\n Updated factor loadings:\n")
+  print(efa_result$loadings, cutoff = 0.32)
+}
+
+print(counter) # n items removed
+```
+```{r}
+# Final cleaned EFA result 
+cat("\n FINAL Factor loadings")
+print(efa_result$loadings, cutoff = 0)
+```
+
+#### 2.5.2 Display the cross-loadings
+Cross-loadings will be marked for assessment for further revisions of the DMA
+```{r cross-loadings}
+# create a dataframe with the cross-loadings
+loadings_matrix <- as.data.frame(unclass(efa_result$loadings))
+
+# Set a cutoff for meaningful loadings
+cutoff <- 0.32
+
+# Find items that load ≥ cutoff on more than one factor
+cross_loadings <- loadings_matrix[
+  apply(loadings_matrix, 1, function(row) sum(abs(row) >= cutoff) > 1),
+]
+
+# Show the cross-loading items and their loadings
+print(cross_loadings)
+```
+
+### 3. Chronbach alpha
+I tested out different factor structures (5, 6, 7). Final choice is 7-factors. The next code chunk is to automatically handle the new factor structure and place the items within the factors they load most to
+
+```{r softcode factors}
+# assume `efa_result$loadings` is your loadings matrix (of class “loadings” but coercible to matrix)
+L <- as.matrix(efa_result$loadings)
+
+# set your cutoff
+cutoff <- 0.32
+
+# for each item (row), find:
+#  1) the largest absolute loading
+#  2) which factor that is
+#  3) only keep it if abs(loading) >= cutoff
+assignments <- apply(L, 1, function(x) {
+  # find the index of the max abs loading
+  idx <- which.max(abs(x))
+  if (abs(x[idx]) >= cutoff) {
+    # return the factor name
+    names(x)[idx]
+  } else {
+    # no loading strong enough
+    NA
+  }
+})
+
+# turn into a data.frame (or tibble) if you like
+df <- data.frame(
+  item   = rownames(L),
+  factor = assignments,
+  loading = sapply(seq_along(assignments), function(i) L[i, assignments[i]])
+)
+
+# drop items not assigned
+df <- na.omit(df)
+
+# split into a named list of vectors
+factor_list <- split(df$item, df$factor)
+
+# now `factor_list` is e.g.
+# $MR1
+# [1] "ld09_data_strategy"  "ld12_data_value_proven" ...
+# $MR2
+# [1] "ld03_leadership_curiosity" ...
+# etc.
+
+# if you want to auto-generate the R code block you showed:
+for(fct in names(factor_list)) {
+  cat(sprintf("\n# %s:\n", fct))
+  cat(sprintf("%s_items <- c(\n  \"%s\"\n)\n\n",
+              fct,
+              paste(factor_list[[fct]], collapse="\",\n  \"")))
+}
+
+```
+### Sum scores
+Summary statistics of the factor-structure
+```{r}
+# Load required package
+library(e1071)  # for skewness and kurtosis
+
+# 1. Create sum scores per factor
+sum_scores <- data.frame(ID = 1:nrow(efa_data_cleaned))
+for (fct in names(factor_list)) {
+  sum_scores[[fct]] <- rowSums(efa_data_cleaned[, factor_list[[fct]]], na.rm = TRUE)
+}
+sum_scores$total_score <- rowSums(sum_scores[, -1], na.rm = TRUE)
+
+# 2. Define function for summary statistics
+describe_sum_scores <- function(score_vector) {
+  min_val <- min(score_vector, na.rm = TRUE)
+  max_val <- max(score_vector, na.rm = TRUE)
+  n <- length(score_vector)
+  
+  data.frame(
+    mean        = round(mean(score_vector, na.rm = TRUE), 2),
+    median      = round(median(score_vector, na.rm = TRUE), 2),
+    sd          = round(sd(score_vector, na.rm = TRUE), 2),
+    min         = min_val,
+    max         = max_val,
+    skewness    = round(skewness(score_vector, na.rm = TRUE), 2),
+    kurtosis    = round(kurtosis(score_vector, na.rm = TRUE), 2)
+  )
+}
+
+# 3. Apply function to each score column (excluding ID)
+summary_list <- lapply(sum_scores[, -1], describe_sum_scores)
+
+# 4. Combine into a data frame
+summary_df <- do.call(rbind, summary_list)
+summary_df$Factor <- rownames(summary_df)
+rownames(summary_df) <- NULL
+
+# 5. View result
+print(summary_df)
+
+
+
+```
+
+
+### Chronbach alpha 
+Code chunk to automatically adapt to the amount of factors chosen for the efa
+```{r soft coded alpha}
+# Function to compute alpha using Spearman correlations
+compute_spearman_alpha <- function(items) {
+  if (length(items) < 2) {
+    return(NA)
+  }
+  alpha_result <- psych::alpha(efa_data_cleaned[, items], check.keys = TRUE)
+  return(alpha_result$total[["raw_alpha"]])
+}
+
+# Automatically compute and print alpha for each factor in factor_list
+for (fct in names(factor_list)) {
+  cat("\n==============================\n", fct, "\n==============================\n", sep = "")
+  alpha_value <- compute_spearman_alpha(factor_list[[fct]])
+  print(alpha_value)
+}
+```
+
+### Item-total correlations
+```{r}
+# Function to calculate item-total correlations per factor
+compute_item_total_corr <- function(data, items) {
+  results <- data.frame(item = items, item_total_corr = NA)
+  
+  for (i in seq_along(items)) {
+    item <- items[i]
+    other_items <- setdiff(items, item)
+    
+    if (length(other_items) > 0) {
+      # Calculate sum score of the rest of the items
+      total_score <- rowSums(data[, other_items], na.rm = TRUE)
+      # Spearman correlation between current item and total score
+      correlation <- cor(data[[item]], total_score, method = "spearman", use = "pairwise.complete.obs")
+      results$item_total_corr[i] <- round(correlation, 3)
+    } else {
+      results$item_total_corr[i] <- NA  # Can't compute with only one item
+    }
+  }
+  
+  return(results)
+}
+
+# Apply function to all factors
+item_total_results <- list()
+
+for (fct in names(factor_list)) {
+  cat("\n==============================\n", fct, "\n==============================\n", sep = "")
+  items <- factor_list[[fct]]
+  res <- compute_item_total_corr(efa_data_cleaned, items)
+  print(res)
+  item_total_results[[fct]] <- res
+}
+```
+
+### Between factor correlations
+```{r}
+# Drop ID column for correlation matrix
+sum_scores_corr <- sum_scores[, -1]  # remove ID if present
+
+# Compute Spearman correlation matrix
+cor_matrix_scores <- cor(sum_scores_corr, method = "spearman", use = "pairwise.complete.obs")
+
+# Print correlation matrix
+cat("\n==============================\nSpearman Correlations Between Factor Scores\n==============================\n")
+print(round(cor_matrix_scores, 3))
+```
+
+
+
+
+
