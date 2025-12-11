@@ -28,8 +28,6 @@ install.packages(c(
 
 - `scripts/data_maturity_assessment_validation_full.R` 
 
-### 5. **Data policy**
-
 ## Data
 Data are available from the Living Lab in Ageing and Long-Term Care (contact via Sil Aarts; s.aarts@maastrichtuniversity.nl) for researchers who meet the criteria for access to the data.
 
