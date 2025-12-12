@@ -26,7 +26,11 @@ install.packages(c(
 ))
 ```
 
-- `scripts/data_maturity_assessment_validation_full.R` 
+## How to run the script
+
+1. open `scripts/data_maturity_assessment_validation_full.R` in R
+2. Change line 17 of script to locations of own data
+3. Run script
 
 ## Data
 Data are available from the Living Lab in Ageing and Long-Term Care (contact via Sil Aarts; s.aarts@maastrichtuniversity.nl) for researchers who meet the criteria for access to the data.
