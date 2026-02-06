@@ -1,6 +1,6 @@
 # DMA validation study
 
-This repository contains code and data to reproduce the analysies for a mixed-methods validation study of a data maturity assessment in healthcare settings. This repository contains the neccessary files to reproduce the quantitative part of the study in which structural validation was tested using both confirmatory and exploratory factor analyses. Additionally, chronbach alpha values were calculated for the new domains. 
+This repository contains code used to produce the analysies for a mixed-methods validation study of a data maturity assessment in healthcare settings. This repository contains the analysis for the quantitative part of the study in which structural validation was tested using both confirmatory and exploratory factor analyses. Additionally, chronbach alpha values were calculated for the new domains. 
 
 ## Repository structure
 
