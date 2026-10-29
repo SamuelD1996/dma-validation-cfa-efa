@@ -1,0 +1,547 @@
+---
+title: "data_maturity_assessment_validation"
+author: "Sam Duijnstee"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Primary analysis on all assessments, and a sensitivity analysis with one
+assessment per organisation (the first), because some organisations completed
+the assessment more than once.
+
+# Package versions
+
+The analysis is run with the package versions reported in the manuscript
+(psych 2.5.3 and lavaan 0.6-19). They are installed once into a separate folder,
+so the normal R library is not changed. Set `use_manuscript_versions <- FALSE`
+to run the analysis with the currently installed versions instead.
+
+```{r install_manuscript_versions, eval=FALSE}
+# Run this chunk ONCE by hand (it is skipped when knitting).
+lib_orig <- "../r_lib_manuscript_versions"
+dir.create(lib_orig, showWarnings = FALSE)
+
+install.packages("https://cran.r-project.org/src/contrib/Archive/psych/psych_2.5.3.tar.gz",
+                 repos = NULL, type = "source", lib = lib_orig)
+install.packages("https://cran.r-project.org/src/contrib/Archive/lavaan/lavaan_0.6-19.tar.gz",
+                 repos = NULL, type = "source", lib = lib_orig)
+
+packageVersion("lavaan", lib.loc = "../r_lib_manuscript_versions")   # should say 0.6.19
+```
+
+```{r packages, message=FALSE, warning=FALSE}
+use_manuscript_versions <- TRUE
+lib_orig <- "../r_lib_manuscript_versions"
+
+if (use_manuscript_versions) {
+  if (!dir.exists(lib_orig)) {
+    stop("Folder '", lib_orig, "' not found. Run the chunk 'install_manuscript_versions' once first.")
+  }
+  # Look in the folder with the manuscript versions first
+  .libPaths(c(normalizePath(lib_orig), .libPaths()))
+}
+
+library(readxl)
+library(dplyr)
+library(psych)        # EFA
+library(lavaan)       # CFA
+library(GPArotation)  # oblimin rotation
+library(ggplot2)
+
+# Stop if the wrong versions are loaded (restart R and run again if this fails)
+if (use_manuscript_versions) {
+  stopifnot(packageVersion("psych")  == "2.5.3",
+            packageVersion("lavaan") == "0.6-19")
+}
+cat("R:", as.character(getRversion()),
+    "| psych:", as.character(packageVersion("psych")),
+    "| lavaan:", as.character(packageVersion("lavaan")),
+    "| GPArotation:", as.character(packageVersion("GPArotation")), "\n")
+```
+
+# Settings
+
+```{r settings}
+file       <- "./data/Ruwe resultaten 2022 tot met dec 2024 sdw gecombineerd.xlsx"
+org_id_col <- "Respondent id"   # column that identifies the organisation
+time_col   <- "Jaar"   # column with the assessment year or date
+
+n_factors <- 7        # number of factors in the EFA
+cutoff    <- 0.32     # items with all |loadings| below this are removed
+seed      <- 20261007 # for the parallel analysis
+out_dir   <- "./results/sensitivity_repeated_assessments"
+```
+
+# 1. Data cleaning
+
+```{r load_and_recode}
+df_raw <- as.data.frame(read_excel(file))
+dvc_labels <- df_raw[, 32:ncol(df_raw), drop = FALSE]  # the questionnaire items
+
+item_names <- c(
+  "ld01_data_awareness", "ld02_finance_ownership", "ld03_leadership_curiosity", "ld04_dgw_planning_theme",
+  "ld05_dgw_dev_budget", "ld06_data_project_based", "ld07_data_initiation", "ld08_dgw_strategic_theme",
+  "ld09_data_strategy", "ld10_cdo_present", "ld11_dgw_struct_budget", "ld12_data_value_proven",
+  "ld13_bi_entity", "ld14_data_driven_norm", "sg15_qualitative_goals", "sg16_financial_reporting",
+  "sg17_ad_hoc_reactive", "sg18_quantified_goals", "sg19_financial_orientation", "sg20_bi_translation",
+  "sg21_interdisciplinary_prioritization", "sg22_goal_adjustment", "sg23_data_driven_goals",
+  "sg24_partner_datascience_collab", "pw25_data_process_documented", "pw26_workflow_translation",
+  "pw27_methodical_datapilots", "pw28_privacy_officer_involved", "pw29_dgw_protocols", "pw30_data_in_policy",
+  "pw31_steering_info_access", "pw32_data_in_innovation", "pw33_ethical_data_processing",
+  "pw34_data_driven_redesign", "dq35_fixed_definitions", "dq36_coordination_definitions",
+  "dq37_org_wide_data_agreements", "dq38_data_reliability", "dq39_practical_definitions",
+  "dq40_info_understandable", "dq41_data_mgmt_and_analytics", "dq42_external_data_enrichment",
+  "dq43_data_for_prediction", "dq44_data_for_ml_dev", "dq45_controlled_dataflows", "at46_app_data_collection",
+  "at47_external_data_access", "at48_bi_env_available", "at49_it_architecture_asset", "at50_central_data_env",
+  "at51_selfservice_dashboard", "at52_advanced_analytics_tooling", "at53_it_supports_operations",
+  "at54_cloud_datascience_use", "at55_semantic_architecture", "em56_data_stewardship",
+  "em57_standardized_workflow", "em58_multidisciplinary_dashboards", "em59_bi_analyst_available",
+  "em60_domain_it_link", "em61_data_in_advice", "em62_data_contact_point", "em63_model_input_professional",
+  "em64_ops_algorithms_balance", "em65_analytics_responsible_role", "em66_tactical_algorithms_balance",
+  "em67_ai_input_professional", "co68_digital_exchange_chain", "co69_patient_secure_comm",
+  "co70_data_governance_partners", "co71_interorg_data_meetings", "co72_thematic_standardization",
+  "co73_digital_exchange_external", "co74_pgo_collaboration", "co75_interorg_data_analysis",
+  "co76_interorg_predictive_decisions", "co77_population_health_data"
+)
+stopifnot(length(item_names) == ncol(dvc_labels))
+names(dvc_labels) <- item_names
+
+# Recode: 0 = applicable, 1 = not applicable but a goal in the short term, 2 = not applicable
+dvc_items <- dvc_labels %>%
+  mutate(across(everything(), ~ case_when(
+    . == "Van toepassing" ~ 0,
+    . == "Niet van toepassing" ~ 2,
+    . %in% c(
+      "Niet van toepassing, hier willen we in 2024 aan werken",
+      "Niet van toepassing, hier willen we in 2023 aan werken",
+      "Niet van toepassing, hier willen we het komende jaar aan werken"
+    ) ~ 1,
+    TRUE ~ NA_real_
+  )))
+
+# Missing values before and after recoding (an unrecognised label would become missing)
+cat("Missing before recoding:", sum(is.na(dvc_labels)), "\n")
+cat("Missing after recoding: ", sum(is.na(dvc_items)), "\n")
+stopifnot(sum(is.na(dvc_items)) == sum(is.na(dvc_labels)))
+```
+
+# 2. Repeated assessments
+
+```{r repeated_assessments}
+stopifnot(!is.null(org_id_col), !is.null(time_col))
+
+org_id <- trimws(do.call(paste, c(unname(as.list(df_raw[org_id_col])), sep = " | ")))
+assessment_time <- df_raw[[time_col]]
+
+cat("Assessments:", nrow(df_raw), "\nUnique organisations:", length(unique(org_id)), "\n")
+print(table(assessments_per_organisation = table(org_id)))
+
+# First assessment of each organisation (ties are broken by the order in the file)
+chron <- order(assessment_time, seq_len(nrow(df_raw)))
+first_rows <- sort(chron[!duplicated(org_id[chron])])
+
+dat_all  <- dvc_items                              # primary sample
+dat_sens <- dvc_items[first_rows, , drop = FALSE]  # sensitivity sample
+
+# Assessments per year in both samples
+year <- if (inherits(assessment_time, c("Date", "POSIXt"))) format(assessment_time, "%Y") else
+  sub(".*?(20[0-9]{2}).*", "\\1", as.character(assessment_time), perl = TRUE)
+print(rbind(all_assessments = table(year), sensitivity_sample = table(factor(year[first_rows], levels = sort(unique(year))))))
+```
+
+# 3. Confirmatory factor analysis
+
+Thresholds: CFI $\geq 0.95$, RMSEA $\leq 0.06$, SRMR $\leq 0.08$. The estimator is
+WLSMV, so the scaled CFI and RMSEA are the ones to report.
+
+```{r cfa}
+model <- '
+  # LD: Leadership and data-culture
+  LD =~ ld01_data_awareness + ld02_finance_ownership + ld03_leadership_curiosity +
+        ld04_dgw_planning_theme + ld05_dgw_dev_budget + ld06_data_project_based +
+        ld07_data_initiation + ld08_dgw_strategic_theme + ld09_data_strategy +
+        ld10_cdo_present + ld11_dgw_struct_budget + ld12_data_value_proven +
+        ld13_bi_entity + ld14_data_driven_norm
+
+  # SG: Strategy & Governance
+  SG =~ sg15_qualitative_goals + sg16_financial_reporting + sg17_ad_hoc_reactive +
+        sg18_quantified_goals + sg19_financial_orientation + sg20_bi_translation +
+        sg21_interdisciplinary_prioritization + sg22_goal_adjustment +
+        sg23_data_driven_goals + sg24_partner_datascience_collab
+
+  # PW: Process oriented work
+  PW =~ pw25_data_process_documented + pw26_workflow_translation +
+        pw27_methodical_datapilots + pw28_privacy_officer_involved +
+        pw29_dgw_protocols + pw30_data_in_policy + pw31_steering_info_access +
+        pw32_data_in_innovation + pw33_ethical_data_processing + pw34_data_driven_redesign
+
+  # DQ: Definitions and data quality
+  DQ =~ dq35_fixed_definitions + dq36_coordination_definitions +
+        dq37_org_wide_data_agreements + dq38_data_reliability +
+        dq39_practical_definitions + dq40_info_understandable +
+        dq41_data_mgmt_and_analytics + dq42_external_data_enrichment +
+        dq43_data_for_prediction + dq44_data_for_ml_dev + dq45_controlled_dataflows
+
+  # AT: Architecture and tools
+  AT =~ at46_app_data_collection + at47_external_data_access +
+        at48_bi_env_available + at49_it_architecture_asset +
+        at50_central_data_env + at51_selfservice_dashboard +
+        at52_advanced_analytics_tooling + at53_it_supports_operations +
+        at54_cloud_datascience_use + at55_semantic_architecture
+
+  # EM: Employee knowledge and skills
+  EM =~ em56_data_stewardship + em57_standardized_workflow +
+        em58_multidisciplinary_dashboards + em59_bi_analyst_available +
+        em60_domain_it_link + em61_data_in_advice + em62_data_contact_point +
+        em63_model_input_professional + em64_ops_algorithms_balance +
+        em65_analytics_responsible_role + em66_tactical_algorithms_balance +
+        em67_ai_input_professional
+
+  # CO: Collaboration with others than own organisation
+  CO =~ co68_digital_exchange_chain + co69_patient_secure_comm +
+       co70_data_governance_partners + co71_interorg_data_meetings +
+       co72_thematic_standardization + co73_digital_exchange_external +
+       co74_pgo_collaboration + co75_interorg_data_analysis +
+       co76_interorg_predictive_decisions + co77_population_health_data
+'
+
+fit_all  <- cfa(model, data = dat_all,  estimator = "WLSMV", ordered = names(dat_all))
+fit_sens <- cfa(model, data = dat_sens, estimator = "WLSMV", ordered = names(dat_sens))
+
+fm <- c("chisq.scaled", "df.scaled", "pvalue.scaled", "cfi", "rmsea", "srmr", "cfi.scaled", "rmsea.scaled")
+cfa_table <- sapply(list(Primary = fit_all, Sensitivity = fit_sens),
+                    function(f) round(as.numeric(fitMeasures(f, fm)), 3))
+rownames(cfa_table) <- fm
+print(cfa_table)
+
+summary(fit_all, fit.measures = TRUE, standardized = TRUE)
+```
+
+# 4. Exploratory factor analysis
+
+The same function is applied to both samples: Spearman correlations, removal of
+items that correlate below .20 with all other items, KMO and Bartlett, parallel
+analysis, EFA (minres, oblimin), stepwise removal of items with all loadings
+below the cut-off, and Cronbach's alpha.
+
+```{r efa_function}
+spearman_cor <- function(d) cor(d, method = "spearman", use = "pairwise.complete.obs")
+
+run_efa <- function(dat, n_factors = 7, cutoff = 0.32, seed = 1) {
+  out <- list(n = nrow(dat))
+
+  # Step 1: correlation matrix; remove items with max |r| < .20, count pairs with |r| > .90
+  R0 <- spearman_cor(dat)
+  R0_off <- R0
+  diag(R0_off) <- NA
+  max_abs_r <- apply(abs(R0_off), 1, max, na.rm = TRUE)
+  out$weak_corr_items   <- names(max_abs_r)[max_abs_r < 0.2]
+  out$n_high_corr_pairs <- sum(abs(R0_off) > 0.9, na.rm = TRUE) / 2
+  d <- dat[, setdiff(names(dat), out$weak_corr_items), drop = FALSE]
+  R <- spearman_cor(d)
+  out$n_items_efa <- ncol(d)
+
+  # Step 2: suitability
+  out$kmo        <- psych::KMO(R)$MSA
+  out$bartlett_p <- psych::cortest.bartlett(R, n = nrow(d))$p.value
+
+  # Step 3: number of factors
+  set.seed(seed)
+  pa <- psych::fa.parallel(R, fm = "minres", fa = "fa", n.obs = nrow(d), plot = FALSE)
+  out$ev_fa            <- pa$fa.values  # eigenvalues of the common-factor solution
+  out$n_parallel       <- pa$nfact
+  out$n_ev_fa_above_1  <- sum(pa$fa.values > 1)
+  out$n_ev_cor_above_1 <- sum(eigen(R, symmetric = TRUE, only.values = TRUE)$values > 1)  # Kaiser-Guttman
+
+  # Step 4: EFA, then remove weakly loading items one at a time
+  efa <- psych::fa(R, nfactors = n_factors, rotate = "oblimin", fm = "minres")
+  out$var_initial      <- efa$Vaccounted
+  out$loadings_initial <- unclass(efa$loadings)  # all loadings before item removal (Appendix 2)
+  out$removed <- character(0)
+  repeat {
+    max_load <- apply(abs(unclass(efa$loadings)), 1, max)
+    weak <- names(max_load)[max_load < cutoff]
+    if (length(weak) == 0) break
+    weakest <- weak[which.min(max_load[weak])]
+    out$removed <- c(out$removed, weakest)
+    d <- d[, setdiff(names(d), weakest), drop = FALSE]
+    efa <- psych::fa(spearman_cor(d), nfactors = n_factors, rotate = "oblimin", fm = "minres")
+  }
+
+  # Step 5: final solution; each item is assigned to the factor with its highest loading
+  L <- unclass(efa$loadings)
+  out$efa <- efa
+  out$loadings <- L
+  out$var_final <- efa$Vaccounted
+  out$factor_list <- split(rownames(L), colnames(L)[apply(abs(L), 1, which.max)])
+  out$n_cross_loadings <- sum(apply(abs(L) >= cutoff, 1, sum) > 1)
+
+  # Step 6: Cronbach's alpha per factor
+  out$alpha <- sapply(out$factor_list, function(its) {
+    if (length(its) < 2) return(NA_real_)
+    suppressWarnings(suppressMessages(
+      psych::alpha(d[, its, drop = FALSE], check.keys = TRUE)
+    ))$total[["raw_alpha"]]
+  })
+  out
+}
+
+print_efa <- function(res) {
+  cat("Items removed, max |r| < .20:", if (length(res$weak_corr_items) == 0) "none" else res$weak_corr_items, "\n")
+  cat("Item pairs with |r| > .90:", res$n_high_corr_pairs, "\n")
+  cat("KMO:", round(res$kmo, 2), "| Bartlett p:", format.pval(res$bartlett_p, digits = 3), "\n")
+  cat("Parallel analysis:", res$n_parallel, "factors\n")
+  cat("Common-factor eigenvalues > 1:", res$n_ev_fa_above_1, "\n")
+  cat("Correlation-matrix eigenvalues > 1 (Kaiser-Guttman):", res$n_ev_cor_above_1, "\n")
+  cat("\nVariance accounted for before item removal:\n")
+  print(round(res$var_initial, 3))
+  cat("\nItems removed, all |loadings| <", cutoff, "(", length(res$removed), "):\n")
+  print(res$removed)
+  cat("\nFinal solution:", nrow(res$loadings), "items. All loadings:\n")
+  print(round(res$loadings[, sort(colnames(res$loadings))], 3))
+  cat("\nVariance accounted for, final solution:\n")
+  print(round(res$var_final, 3))
+  cat("\nItems per factor and Cronbach's alpha:\n")
+  print(rbind(n_items = lengths(res$factor_list), alpha = round(res$alpha, 3)))
+  cat("\nInter-factor correlations (Phi):\n")
+  print(round(res$efa$Phi, 3))
+}
+
+# Loading table in the layout of Multimedia Appendices 2 and 4:
+# - all loadings are shown, factors in the order MR1, MR2, ..., MR7;
+# - the first two rows are the sums of squared loadings and the explained variance (%)
+#   from psych (Vaccounted, which takes the factor correlations into account);
+# - items are grouped by the factor with their highest absolute loading and sorted from
+#   high to low within each factor; items without any |loading| >= cutoff come last
+#   (Factor = "none"), in questionnaire order.
+appendix_table <- function(L, V, cutoff = 0.32) {
+  f <- sort(colnames(L))
+  L <- L[, f, drop = FALSE]
+  V <- V[, f, drop = FALSE]
+  main       <- apply(abs(L), 1, which.max)
+  loads      <- apply(abs(L), 1, max) >= cutoff
+  grp        <- ifelse(loads, f[main], "none")
+  main_value <- L[cbind(seq_len(nrow(L)), main)]
+  ord <- order(match(grp, c(f, "none")), ifelse(loads, -main_value, 0), seq_len(nrow(L)))
+
+  items <- data.frame(Item    = toupper(substr(rownames(L), 1, 4)),
+                      Content = sub("^[a-z]{2}[0-9]{2}_", "", rownames(L)),
+                      Factor  = grp,
+                      round(L, 3),
+                      check.names = FALSE, row.names = NULL)[ord, ]
+  header <- data.frame(Item    = c("SS loadings", "Explained variance (%)"),
+                       Content = "", Factor = "",
+                       rbind(round(V["SS loadings", ], 3), round(100 * V["Proportion Var", ], 1)),
+                       check.names = FALSE, row.names = NULL)
+  out <- rbind(header, items)
+  rownames(out) <- NULL
+  out
+}
+
+# Shows an appendix table in the knitted document; loadings >= cutoff in bold
+show_appendix <- function(tab, cutoff = 0.32) {
+  mr  <- grep("^MR", names(tab))
+  pct <- tab$Item == "Explained variance (%)"
+  ss  <- tab$Item == "SS loadings"
+  out <- tab
+  for (j in mr) {
+    x <- tab[[j]]
+    s <- formatC(x, format = "f", digits = 3)
+    s[pct] <- formatC(x[pct], format = "f", digits = 1)
+    bold <- !pct & !ss & abs(x) >= cutoff
+    s[bold] <- paste0("**", s[bold], "**")
+    out[[j]] <- s
+  }
+  knitr::kable(out, row.names = FALSE, align = c("l", "l", "l", rep("r", length(mr))))
+}
+```
+
+## 4.1 Primary analysis (all assessments)
+
+```{r efa_primary}
+res_primary <- run_efa(dat_all, n_factors, cutoff, seed)
+print_efa(res_primary)
+```
+
+### Multimedia Appendix 2: loadings before item removal
+
+```{r appendix_2}
+app2 <- appendix_table(res_primary$loadings_initial, res_primary$var_initial, cutoff)
+cat("Items:", nrow(res_primary$loadings_initial),
+    "| Total explained variance:", round(100 * sum(res_primary$var_initial["Proportion Var", ]), 1), "%\n")
+show_appendix(app2, cutoff)
+```
+
+### Multimedia Appendix 4: loadings of the final solution
+
+```{r appendix_4}
+app4 <- appendix_table(res_primary$loadings, res_primary$var_final, cutoff)
+cat("Items:", nrow(res_primary$loadings),
+    "| Total explained variance:", round(100 * sum(res_primary$var_final["Proportion Var", ]), 1), "%\n")
+show_appendix(app4, cutoff)
+```
+
+```{r scree_plot}
+ev_plot_df <- data.frame(Factor = seq_along(res_primary$ev_fa), Actual = res_primary$ev_fa)
+
+ggplot(ev_plot_df, aes(x = Factor, y = Actual)) +
+  geom_line(color = "#0072B2", linewidth = 1.2) +
+  geom_point(color = "#0072B2", size = 2) +
+  geom_hline(yintercept = 1, linetype = "dotted", color = "darkgrey") +
+  geom_vline(xintercept = res_primary$n_parallel, linetype = "dotted", color = "darkorange", linewidth = 1) +
+  annotate("text", x = nrow(ev_plot_df) * 0.95, y = 1.4, label = "Eigenvalue = 1", hjust = 1,
+           size = 3.5, color = "darkgrey", fontface = "italic") +
+  annotate("text", x = res_primary$n_parallel + 9, y = max(ev_plot_df$Actual) * 0.97, label = "PA-result",
+           hjust = 1, size = 3.5, color = "darkorange", fontface = "italic") +
+  labs(x = "Number of Factors", y = "Eigenvalue") +
+  scale_x_continuous(breaks = seq(0, nrow(ev_plot_df), by = 5)) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(),
+        axis.text = element_text(color = "black"), axis.title = element_text(face = "bold", size = 13))
+```
+
+## 4.2 Sensitivity analysis (first assessment per organisation)
+
+```{r efa_sensitivity}
+res_sens <- run_efa(dat_sens, n_factors, cutoff, seed)
+print_efa(res_sens)
+```
+
+# 5. Comparison of the primary and the sensitivity analysis
+
+Factor solutions are compared with Tucker's congruence coefficient (.95 or
+higher: factors can be considered equal; .85 to .94: fair similarity;
+Lorenzo-Seva and ten Berge, 2006).
+
+```{r comparison_functions}
+# Tucker's congruence between the columns of two loading matrices
+tucker <- function(A, B) crossprod(A, B) / sqrt(outer(colSums(A^2), colSums(B^2)))
+
+# One-to-one matching of factors, starting with the highest |congruence|
+match_factors <- function(phi) {
+  P <- abs(phi)
+  pairs <- NULL
+  for (k in seq_len(min(dim(P)))) {
+    idx <- which(P == max(P, na.rm = TRUE), arr.ind = TRUE)[1, ]
+    pairs <- rbind(pairs, data.frame(reference = rownames(P)[idx[1]], comparison = colnames(P)[idx[2]],
+                                     congruence = phi[idx[1], idx[2]], stringsAsFactors = FALSE))
+    P[idx[1], ] <- NA
+    P[, idx[2]] <- NA
+  }
+  pairs[order(pairs$reference), ]
+}
+```
+
+```{r comparison}
+# Key results side by side
+key_results <- function(res) c(
+  "Assessments (n)"                                      = res$n,
+  "Items removed, max |r| < .20"                         = length(res$weak_corr_items),
+  "KMO overall MSA"                                      = round(res$kmo, 2),
+  "Parallel analysis (factors)"                          = res$n_parallel,
+  "Common-factor eigenvalues > 1"                        = res$n_ev_fa_above_1,
+  "Correlation-matrix eigenvalues > 1 (Kaiser-Guttman)"  = res$n_ev_cor_above_1,
+  "Cumulative variance before item removal (%)"          = round(100 * max(res$var_initial["Cumulative Var", ]), 1),
+  "Items removed, all |loadings| < cut-off"              = length(res$removed),
+  "Items in final solution"                              = nrow(res$loadings),
+  "Cumulative variance final solution (%)"               = round(100 * max(res$var_final["Cumulative Var", ]), 1),
+  "Items with cross-loadings"                            = res$n_cross_loadings,
+  "Cronbach's alpha, lowest"                             = round(min(res$alpha, na.rm = TRUE), 2),
+  "Cronbach's alpha, highest"                            = round(max(res$alpha, na.rm = TRUE), 2)
+)
+comparison_table <- cbind(Primary = key_results(res_primary), Sensitivity = key_results(res_sens))
+print(comparison_table)
+
+# Comparison 1: same items. The seven-factor EFA is run in the sensitivity sample
+# on exactly the items of the final primary solution.
+L_primary <- res_primary$loadings
+items_primary <- rownames(L_primary)
+efa_same <- psych::fa(spearman_cor(dat_sens[, items_primary, drop = FALSE]),
+                      nfactors = n_factors, rotate = "oblimin", fm = "minres")
+L_same <- unclass(efa_same$loadings)[items_primary, , drop = FALSE]
+
+cong_same <- match_factors(tucker(L_primary, L_same))
+map <- setNames(cong_same$reference, cong_same$comparison)
+same_factor <- unname(map[colnames(L_same)[apply(abs(L_same), 1, which.max)]]) ==
+  colnames(L_primary)[apply(abs(L_primary), 1, which.max)]
+
+cat("\nComparison 1 (same items): congruence of matched factors\n")
+print(cong_same, row.names = FALSE)
+cat("Items with their highest loading on the corresponding factor:", sum(same_factor), "of", length(same_factor), "\n")
+cat("Items that move to another factor:", if (all(same_factor)) "none" else items_primary[!same_factor], "\n")
+
+# Comparison 2: each analysis with its own item removal, compared on the items both retained
+common_items <- intersect(items_primary, rownames(res_sens$loadings))
+cong_own <- match_factors(tucker(L_primary[common_items, , drop = FALSE],
+                                 res_sens$loadings[common_items, , drop = FALSE]))
+
+cat("\nComparison 2 (own item removal): items retained in both analyses:", length(common_items), "\n")
+print(cong_own, row.names = FALSE)
+cat("Retained in the primary analysis only:", setdiff(items_primary, rownames(res_sens$loadings)), "\n")
+cat("Retained in the sensitivity analysis only:", setdiff(rownames(res_sens$loadings), items_primary), "\n")
+```
+
+# 6. Six versus seven factors
+
+The six-factor solution suggested by parallel analysis is compared with the
+seven-factor solution: which factors combine, which items each solution
+retains, and how the items are distributed over the factors.
+
+```{r six_vs_seven_factors}
+# Six-factor solution, same procedure as the seven-factor solution
+res_6 <- run_efa(dat_all, n_factors = 6, cutoff, seed)
+print_efa(res_6)
+
+# Which factors of the seven-factor solution combine in the six-factor solution?
+# Compared before item removal, on the same 76 items
+d76 <- dat_all[, setdiff(names(dat_all), res_primary$weak_corr_items)]
+efa7_init <- psych::fa(spearman_cor(d76), nfactors = 7, rotate = "oblimin", fm = "minres")
+efa6_init <- psych::fa(spearman_cor(d76), nfactors = 6, rotate = "oblimin", fm = "minres")
+# Check: the seven-factor fit here is the same as the one shown in Appendix 2
+cat("Same fit as the one shown in Appendix 2:",
+    isTRUE(all.equal(unclass(efa7_init$loadings), res_primary$loadings_initial)), "\n")
+cat("\nCongruence before item removal (rows: 7 factors, columns: 6 factors):\n")
+print(round(tucker(unclass(efa7_init$loadings), unclass(efa6_init$loadings)), 2))
+
+# Final solutions, compared on the items both retained
+common_67 <- intersect(rownames(res_primary$loadings), rownames(res_6$loadings))
+cat("\nItems retained in both final solutions:", length(common_67), "\n")
+cat("Congruence of the final solutions (rows: 7 factors, columns: 6 factors):\n")
+print(round(tucker(res_primary$loadings[common_67, ], res_6$loadings[common_67, ]), 2))
+
+# Item assignment side by side
+assign7 <- setNames(colnames(res_primary$loadings)[apply(abs(res_primary$loadings), 1, which.max)],
+                    rownames(res_primary$loadings))
+assign6 <- setNames(colnames(res_6$loadings)[apply(abs(res_6$loadings), 1, which.max)],
+                    rownames(res_6$loadings))
+all_items <- union(names(assign7), names(assign6))
+table_67 <- data.frame(item = all_items,
+                       factor_7 = unname(assign7[all_items]),
+                       factor_6 = unname(assign6[all_items]))
+cat("\nCross-table of item assignment (NA = removed in that solution):\n")
+print(table(factor_7 = table_67$factor_7, factor_6 = table_67$factor_6, useNA = "ifany"))
+print(table_67[order(table_67$factor_7, table_67$factor_6), ], row.names = FALSE)
+```
+
+```{r save_tables}
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(cfa_table,        file.path(out_dir, "cfa_fit.csv"))
+write.csv(comparison_table, file.path(out_dir, "efa_key_results_primary_vs_sensitivity.csv"))
+write.csv(cong_same,        file.path(out_dir, "congruence_same_items.csv"), row.names = FALSE)
+write.csv(cong_own,         file.path(out_dir, "congruence_own_item_removal.csv"), row.names = FALSE)
+write.csv(app2, file.path(out_dir, "appendix_2_loadings_before_removal.csv"), row.names = FALSE)
+write.csv(app4, file.path(out_dir, "appendix_4_loadings_final.csv"), row.names = FALSE)
+write.csv(round(L_primary, 3),         file.path(out_dir, "loadings_primary_final.csv"))
+write.csv(round(L_same, 3),            file.path(out_dir, "loadings_sensitivity_same_items.csv"))
+write.csv(round(res_sens$loadings, 3), file.path(out_dir, "loadings_sensitivity_own_item_removal.csv"))
+write.csv(round(res_6$loadings, 3),    file.path(out_dir, "loadings_six_factors_final.csv"))
+write.csv(table_67,                  file.path(out_dir, "item_assignment_7_vs_6_factors.csv"), row.names = FALSE)
+```
+
+```{r session_info}
+sessionInfo()
+```
