@@ -117,14 +117,8 @@ in the `packages` chunk to use locally installed versions. Results may differ be
 
 1. Clone or download this repository and open the `.Rmd` file in RStudio.
 2. Obtain the required input Excel workbook. **The raw dataset is not provided here**; access is required to reproduce the results.
-3. Ensure the path in the `settings` chunk points to the input workbook. The current setting is:
-
-   ```r
-   file <- "./data/Ruwe resultaten 2022 tot met dec 2024 sdw gecombineerd.xlsx"
-   ```
-
-4. Install the required R packages and, if using the manuscript versions, run the `install_manuscript_versions` chunk once.
-5. Knit the R Markdown file to HTML, or run its chunks in sequence.
+3. Install the required R packages and, if using the manuscript versions, run the `install_manuscript_versions` chunk once.
+4. Knit the R Markdown file to HTML, or run its chunks in sequence.
 
 **Path note:** The script uses relative paths for both its input (`./data/...`) and output (`./results/...`). Set the R working directory to the repository root, or adjust these paths to your local setup, before running the analysis.
 
